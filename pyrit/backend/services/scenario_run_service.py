@@ -1421,7 +1421,7 @@ class ScenarioRunService:
             )
         )
         techniques_used = (
-            list(dict.fromkeys(group.display_group for group in plan.atomic_groups))
+            list(dict.fromkeys(group.technique_name or group.display_group for group in plan.atomic_groups))
             if plan is not None
             else scenario_result.get_techniques_used()
         )
@@ -1577,6 +1577,11 @@ class ScenarioRunService:
         Returns:
             ScenarioRunListItem: Safe, aggregated history summary.
         """
+        if atomic_groups is not None:
+            atomic_groups = self._enrich_legacy_group_techniques(
+                atomic_groups=atomic_groups,
+                scenario_name=record.scenario_registry_name,
+            )
         scenario_identifier = None
         try:
             scenario_identifier = ScenarioIdentifier.from_component_identifier(
@@ -1622,7 +1627,7 @@ class ScenarioRunService:
         if terminal and record.completed_at is not None:
             timestamps.append(record.completed_at)
         techniques = (
-            list(dict.fromkeys(group.display_group for group in atomic_groups))
+            list(dict.fromkeys(group.technique_name or group.display_group for group in atomic_groups))
             if atomic_groups is not None
             else list(aggregate.atomic_attack_names)
         )
@@ -1870,26 +1875,34 @@ class ScenarioRunService:
         if raw_plan is None:
             return None
         plan = ScenarioRunPlan.model_validate(raw_plan)
-        return self._enrich_legacy_plan_techniques(plan=plan)
+        atomic_groups = self._enrich_legacy_group_techniques(
+            atomic_groups=plan.atomic_groups,
+            scenario_name=plan.scenario_registry_name,
+        )
+        return plan.model_copy(update={"atomic_groups": atomic_groups})
 
-    def _enrich_legacy_plan_techniques(self, *, plan: ScenarioRunPlan) -> ScenarioRunPlan:
+    def _enrich_legacy_group_techniques(
+        self,
+        *,
+        atomic_groups: list[ScenarioRunPlanAtomicGroup],
+        scenario_name: str | None,
+    ) -> list[ScenarioRunPlanAtomicGroup]:
         """
-        Add technique identity and metadata to plans stored before those fields existed.
+        Recover technique metadata for legacy groups in full plans and compact history projections.
 
         Returns:
-            ScenarioRunPlan: The original plan or a copy with recovered technique metadata.
+            list[ScenarioRunPlanAtomicGroup]: The original groups or copies with recovered technique metadata.
         """
-        scenario_name = plan.scenario_registry_name
-        if scenario_name is None or all(group.technique_name for group in plan.atomic_groups):
-            return plan
+        if scenario_name is None or all(group.technique_name for group in atomic_groups):
+            return atomic_groups
 
         technique_summaries = self._get_scenario_technique_summaries(scenario_name=scenario_name)
         if not technique_summaries:
-            return plan
+            return atomic_groups
 
         candidate_names = sorted(technique_summaries, key=len, reverse=True)
         enriched_groups: list[ScenarioRunPlanAtomicGroup] = []
-        for group in plan.atomic_groups:
+        for group in atomic_groups:
             technique_name = group.technique_name
             if technique_name is None:
                 technique_name = next(
@@ -1913,7 +1926,7 @@ class ScenarioRunService:
                     }
                 )
             )
-        return plan.model_copy(update={"atomic_groups": enriched_groups})
+        return enriched_groups
 
     def _get_scenario_technique_summaries(
         self,
@@ -2026,7 +2039,9 @@ class ScenarioRunService:
         scenario_identifier = header_result.scenario_identifier
         target, datasets_used, scenario_parameters = self._safe_run_metadata(scenario_identifier=scenario_identifier)
         if plan is not None:
-            techniques_used = list(dict.fromkeys(group.display_group for group in plan.atomic_groups))
+            techniques_used = list(
+                dict.fromkeys(group.technique_name or group.display_group for group in plan.atomic_groups)
+            )
         else:
             techniques_used = self._identifier_techniques(scenario_identifier)
         return ScenarioRunProgress(
